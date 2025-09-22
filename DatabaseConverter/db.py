@@ -1,23 +1,45 @@
 import os
+import sys
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import OperationalError
 
-# Prefer environment var DATABASE_URL, else try Streamlit secrets, else local sqlite
+# Try to read a DATABASE_URL (env var or Streamlit secrets)
 db_url = os.environ.get("DATABASE_URL")
 try:
     import streamlit as st
     if not db_url:
         db_url = st.secrets.get("DATABASE_URL", None)
 except Exception:
+    # running outside Streamlit or st not available -> ignore
     pass
 
-if not db_url:
-    db_url = "sqlite:///company_data.db"
+def try_connect(url):
+    """Try to create an engine and test a simple query. Return engine or None."""
+    if not url:
+        return None
+    try:
+        # create engine (psycopg2 URL or similar)
+        e = create_engine(url, pool_pre_ping=True)
+        # test connection right away
+        with e.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return e
+    except Exception as exc:
+        # fail quietly; caller will fallback to sqlite
+        print("DB connect failed:", exc, file=sys.stderr)
+        return None
 
-connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
-engine = create_engine(db_url, connect_args=connect_args, pool_pre_ping=True)
+# 1) prefer real DB (Supabase) if reachable
+engine = try_connect(db_url)
+
+# 2) If not reachable, fall back to local sqlite (keeps the app working locally)
+if engine is None:
+    sqlite_url = "sqlite:///company_data.db"
+    engine = create_engine(sqlite_url, connect_args={"check_same_thread": False}, pool_pre_ping=True)
+    print("Using local sqlite database at company_data.db", file=sys.stderr)
 
 def init_db():
-    # create a simple companies table that works on sqlite and Postgres
+    """Create a minimal companies table compatible with both sqlite and Postgres."""
     dialect = engine.dialect.name
     if dialect == "sqlite":
         create_sql = """
@@ -42,5 +64,5 @@ def init_db():
     with engine.begin() as conn:
         conn.execute(text(create_sql))
 
-# run on import so DB exists automatically
+# Initialise DB when imported
 init_db()
