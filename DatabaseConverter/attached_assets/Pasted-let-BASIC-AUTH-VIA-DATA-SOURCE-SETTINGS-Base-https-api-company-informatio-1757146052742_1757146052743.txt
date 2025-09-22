@@ -1,0 +1,195 @@
+let 
+  // ===== BASIC AUTH VIA DATA SOURCE SETTINGS =====
+  Base = "https://api.company-information.service.gov.uk",
+
+  // ===== Helpers =====
+  WB   = Excel.CurrentWorkbook(),
+  NBSP = Character.FromNumber(160),
+
+  NormalizeName = (s as text) as text =>
+      let
+        s1 = Text.Replace(s, NBSP, " "),
+        s2 = Text.Lower(Text.Trim(s1)),
+        s3 = Text.Replace(Text.Replace(s2, "_", " "), "-", " "),
+        s4 = Text.Combine(List.Select(Text.SplitAny(s3, " "), each _ <> ""), " ")
+      in s4,
+
+  // Exact-name reader for Results_No
+  ReadOneExact = (nm as text) as any =>
+    let
+      t = try WB{[Name = nm]}[Content] otherwise null,
+      v = if t = null then error "Named range '" & nm & "' not found (workbook-scope, single cell required)."
+          else
+            let cols = Table.ColumnNames(t)
+            in  if Table.RowCount(t)=0 or List.Count(cols)=0
+                then error "Named range '" & nm & "' is empty."
+                else Record.Field(t{0}, cols{0})
+    in v,
+
+  // Flexible reader (for other inputs)
+  FindRange = (candidates as list) as table =>
+      let targets  = List.Transform(candidates, each NormalizeName(_)),
+          WithNorm = Table.AddColumn(WB, "norm", each NormalizeName([Name])),
+          Hit      = Table.SelectRows(WithNorm, each List.Contains(targets, [norm]))
+      in if Table.RowCount(Hit) > 0 then Hit{0}[Content]
+         else error "Named range not found. Define a single-cell name for one of: " & Text.Combine(candidates, ", "),
+
+  GetFirstCell = (t as table) as any =>
+      let cols = Table.ColumnNames(t)
+      in  if Table.RowCount(t)=0 or List.Count(cols)=0 then null else Record.Field(t{0}, cols{0}),
+
+  // ===== Inputs =====
+  ResRaw  = ReadOneExact("Results_No"),
+  SicTbl  = FindRange({"Sic Codes","Sic_Codes","sic-codes","SIC","SIC Codes","SIC_Codes"}),
+  StatTbl = FindRange({"Company Status","Company_Status","company-status","Status","status"}),
+  FromTbl = FindRange({"Incorporated from","Incorporated_from","incorporated-from","From","from"}),
+
+  SicRaw   = GetFirstCell(SicTbl),
+  StatRaw  = GetFirstCell(StatTbl),
+  FromRaw  = GetFirstCell(FromTbl),
+
+  // Clean inputs
+  SicCodes = if SicRaw = null then "" else Text.Replace(Text.Trim(Text.From(SicRaw)), " ", ""),
+  CompanyStatus =
+      let s = if StatRaw = null then "" else Text.Lower(Text.Trim(Text.From(StatRaw))) in s,
+  IncorporatedFrom =
+      let d = try Date.From(FromRaw) otherwise null
+      in  if d <> null then Date.ToText(d, "yyyy-MM-dd")
+          else if FromRaw = null then "" else Text.Trim(Text.From(FromRaw)),
+
+  // Results_No: robust parse + clamp + dynamic PageSize
+  ResTxt        = Text.Trim(Text.Replace(Text.From(ResRaw), NBSP, " ")),
+  ResNum        = try Number.From(ResTxt) otherwise error "Results_No value '" & ResTxt & "' is not numeric.",
+  MaxCompanies0 = Number.RoundDown(ResNum),
+  MaxCompanies  = if MaxCompanies0 < 1 then 1 else if MaxCompanies0 > 50000 then 50000 else MaxCompanies0,
+  PageSize      = if MaxCompanies < 5000 then MaxCompanies else 5000,
+
+  // 0) Ping
+  PingAttempt = try Web.Contents(
+                    Base,
+                    [ RelativePath = "search/companies",
+                      Query       = [ q = "tesco", items_per_page = "1" ],
+                      Timeout     = #duration(0,0,20,0)
+                    ]),
+  _Ok  = PingAttempt[HasError] = false,
+  _Guard = if _Ok then null else error Error.Message(PingAttempt[Error]),
+
+  // ---- Fetch one page helper ----
+  FetchPage = (start as number, size as number) as list =>
+    let
+      J = try Json.Document(
+              Web.Contents(
+                Base,
+                [ RelativePath = "advanced-search/companies",
+                  Query = [
+                    sic_codes         = SicCodes,
+                    company_status    = CompanyStatus,
+                    incorporated_from = IncorporatedFrom,
+                    size              = Text.From(size),
+                    start_index       = Text.From(start)
+                  ],
+                  Timeout = #duration(0,0,60,0)
+                ])) otherwise null,
+      Items = if J = null then {} else (try J[items] otherwise {})
+    in
+      Items,
+
+  // ---- Paging (no over-fetch; stop as soon as enough) ----
+  First = FetchPage(0, PageSize),
+  Pages = List.Generate(
+            () => [start = 0, acc = 0, items = First],
+            each List.Count([items]) > 0 and [acc] < MaxCompanies,
+            each 
+              let
+                newAcc    = [acc] + List.Count([items]),
+                nextStart = [start] + PageSize,
+                nextItems = if newAcc >= MaxCompanies then {} else FetchPage(nextStart, PageSize)
+              in
+                [ start = nextStart, acc = newAcc, items = nextItems ],
+            each [items]),
+  TopItems = List.FirstN(List.Combine(Pages), MaxCompanies),
+
+  // ---- Shape results ----
+  Companies = Table.FromList(TopItems, Splitter.SplitByNothing(), {"rec"}, null, ExtraValues.Error),
+  E1 = Table.ExpandRecordColumn(
+         Companies, "rec",
+         {"company_number","company_name","registered_office_address","date_of_creation"},
+         {"company_number","Company name","roa","date_of_creation"}),
+  E1Typed = Table.TransformColumnTypes(E1, {{"date_of_creation", type date}}),
+  E1Ren   = Table.RenameColumns(E1Typed, {{"date_of_creation","Date of incorporation"},{"company_number","Company number"}}),
+
+  E2 = Table.ExpandRecordColumn(
+         E1Ren, "roa",
+         {"address_line_1","address_line_2","locality","region","postal_code","country"},
+         {"address_line_1","address_line_2","locality","region","postal_code","country"}),
+
+  WithRO = Table.AddColumn(
+            E2, "Registered Office",
+            each Text.Combine(
+              List.Select({[address_line_1],[address_line_2],[locality],[region],[postal_code],[country]}, each _ <> null and _ <> ""),
+              ", "), type text),
+
+  Core         = Table.SelectColumns(WithRO, {"Company number","Company name","Registered Office","Date of incorporation"}),
+  CoreBuffered = Table.Buffer(Core),
+
+  // ---- Officers ----
+  NormalizeOfficer = (name as nullable text) as nullable text =>
+    let n0 = if name = null then null else Text.Trim(name),
+        Titles = {"MR","MRS","MISS","MS","MX","DR","SIR","DAME","LORD","LADY","PROF","PROFESSOR","REV","REVEREND","CAPT","CAPTAIN","MAJ","MAJOR","LT","LT.","COL","COLONEL"}
+    in  if n0 = null or n0 = "" then null
+        else
+          let U = Text.Upper(n0),
+              IsCorp = List.AnyTrue(List.Transform({" LIMITED"," LTD"," LLP"," PLC"," CIC"," INC"," LLC"," GMBH"," SA"," BV"," TRUST"," FOUNDATION"," ASSOCIATION"}, each Text.Contains(U, _)))
+          in  if IsCorp then Text.Proper(Text.Lower(n0))
+              else if Text.Contains(n0, ",") then
+                let P = List.Transform(Text.Split(n0, ","), each Text.Trim(_)),
+                    Last = if List.Count(P) >= 1 then Text.Upper(Text.Trim(P{0})) else "",
+                    FRaw = if List.Count(P) >= 2 then P{1} else "",
+                    FWords = List.Select(Text.Split(Text.Upper(FRaw), " "), each _ <> "" and not List.Contains(Titles, _)),
+                    First = if List.Count(FWords) > 0 then FWords{0} else ""
+                in  if First <> "" and Last <> "" then Text.Proper(Text.Lower(First)) & " - " & Text.Proper(Text.Lower(Last)) else Text.Proper(Text.Lower(n0))
+              else
+                let W = List.Select(Text.Split(U, " "), each _ <> "" and not List.Contains(Titles, _)),
+                    First = if List.Count(W) > 0 then W{0} else "",
+                    Last  = if List.Count(W) > 1 then W{List.Count(W)-1} else ""
+                in  if First <> "" and Last <> "" then Text.Proper(Text.Lower(First)) & " - " & Text.Proper(Text.Lower(Last)) else Text.Proper(Text.Lower(n0)),
+
+  GetOfficerDetails = (co as text) as text =>
+    let
+      J = try Json.Document(Web.Contents(Base, [ RelativePath = "company/" & co & "/officers", Query=[ items_per_page="100" ], Timeout=#duration(0,0,60,0) ])) otherwise null,
+      L = if J = null then {} else (try J[items] otherwise {}),
+      T = Table.FromList(L, Splitter.SplitByNothing(), {"o"}, null, ExtraValues.Error)
+    in  if T = null or Table.IsEmpty(T) then "" else
+        let X = Table.ExpandRecordColumn(T, "o", {"name","resigned_on"}, {"name","resigned_on"}),
+            Active  = Table.SelectRows(X, each [resigned_on] = null),
+            WithNorm= Table.AddColumn(Active, "norm", each NormalizeOfficer([name]), type text),
+            Norms   = List.Select(Table.Column(WithNorm, "norm"), each _ <> null and _ <> ""),
+            Unique  = List.Distinct(Norms)
+        in  Text.Combine(Unique, "; "),
+
+  WithOfficers = Table.AddColumn(CoreBuffered, "Officer details", each GetOfficerDetails([Company number]), type text),
+
+  // ---- Charges (most recent only) ----
+  GetChargeSummary = (co as text) as table =>
+    let
+      J = try Json.Document(Web.Contents(Base, [RelativePath="company/" & co & "/charges", Timeout=#duration(0,0,60,0)])) otherwise null,
+      L = if J = null then {} else (try J[items] otherwise {}),
+      T = Table.FromList(L, Splitter.SplitByNothing(), {"c"}, null, ExtraValues.Error)
+    in  if T = null or Table.IsEmpty(T) then #table({"Charge Person entitled","charged date created","charge status"}, {{null, null, null}})
+        else
+          let X1 = Table.ExpandRecordColumn(T, "c", {"created_on","status","persons_entitled"}, {"created_on","charge status","persons_entitled"}),
+              X2 = Table.TransformColumnTypes(X1, {{"created_on", type date}}),
+              X3 = Table.Sort(X2, {{"created_on", Order.Descending}}),
+              Top = X3{0},
+              NamesList = try List.Transform(Top[persons_entitled], each try _[name] otherwise null) otherwise {},
+              NamesText = Text.Combine(List.Select(NamesList, each _ <> null and _ <> ""), "; ")
+          in  #table({"Charge Person entitled","charged date created","charge status"}, {{NamesText, Top[created_on], Top[charge status]}}),
+
+  WithSummary = Table.AddColumn(WithOfficers, "ChargeSummary", each GetChargeSummary([Company number])),
+  Expanded    = Table.ExpandTableColumn(WithSummary, "ChargeSummary", {"Charge Person entitled","charged date created","charge status"}, {"Charge Person entitled","charged date created","charge status"}),
+
+  // Final hard cap (no index column)
+  Limited = Table.FirstN(Expanded, MaxCompanies),
+  #"Reordered Columns" = Table.ReorderColumns(Limited,{"Company number","Company name","Officer details","Charge Person entitled","charged date created","charge status","Date of incorporation","Registered Office"})
+in
+  #"Reordered Columns"

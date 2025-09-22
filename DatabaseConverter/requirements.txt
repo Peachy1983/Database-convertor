@@ -1,0 +1,11 @@
+streamlit
+sqlalchemy
+alembic
+pandas
+requests
+python-dotenv
+plotly
+psycopg2-binary
+sqlite-utils
+openpyxl
+apscheduler

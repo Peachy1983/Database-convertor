@@ -1,0 +1,54 @@
+Hey Lewis — short answer: yes. But the field you want (“planning-application-category”) lives on the planning-application-type dataset, not the planning-permission-type dataset you linked.
+	•	Your link (planning-permission-type) lists the 7 permission types (e.g., full, outline, etc.). ￼
+	•	The category field is exposed on each planning application type entry as planning-application-category (e.g., “full”, “householder”, “advert”, etc.). ￼
+	•	The Planning Data API endpoint you’ll use is /entity.json with query params. ￼
+
+How to get the application categories via the API
+
+1) All application types with their categories (one call)
+
+GET https://www.planning.data.gov.uk/entity.json
+  ?dataset=planning-application-type
+  &field=reference
+  &field=name
+  &field=planning-application-category
+  &limit=1000
+
+This returns a list of application types; each object includes planning-application-category. (Endpoint and parameters per docs. ) ￼
+
+Example of one item (from “Full planning permission”):
+
+{
+  "reference": "full-planning-permission",
+  "name": "Full planning permission",
+  "planning-application-category": "full",
+  "dataset": "planning-application-type",
+  "entity": 621003
+}
+
+(That object and field are shown on the entity page.) ￼
+
+2) Just the distinct category values (client-side de-dupe)
+
+The API doesn’t expose a “distinct” operator, so pull the list above and de-duplicate planning-application-category in your code.
+
+Pseudo in JavaScript
+
+const res = await fetch('https://www.planning.data.gov.uk/entity.json?dataset=planning-application-type&field=planning-application-category&limit=1000');
+const { entities } = await res.json();
+const categories = [...new Set(entities.map(e => e["planning-application-category"]).filter(Boolean))];
+console.log(categories);
+
+3) If you truly need the 7 “permission types”
+
+Call the dataset you shared:
+
+GET https://www.planning.data.gov.uk/entity.json
+  ?dataset=planning-permission-type
+  &field=reference
+  &field=name
+  &limit=100
+
+(This yields items like “full-planning-permission”, “outline-planning-permission”, etc.) ￼
+
+If you tell me which format you’d like (CSV/JSON) or the language you’re using, I can drop in a ready-to-run snippet that outputs a clean list of unique application categories.

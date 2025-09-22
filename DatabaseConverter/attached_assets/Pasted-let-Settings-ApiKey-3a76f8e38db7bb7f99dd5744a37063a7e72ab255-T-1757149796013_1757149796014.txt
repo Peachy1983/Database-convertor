@@ -1,0 +1,63 @@
+let
+    // ===== Settings =====
+    ApiKey    = "3a76f8e38db7bb7f99dd5744a37063a7e72ab255",
+    TableName = "companies",
+
+    // ===== Load table =====
+    Source = Excel.CurrentWorkbook(){[Name=TableName]}[Content],
+
+    // Use column 1 (index 0) as the company name
+    Cols = Table.ColumnNames(Source),
+    CompanyCol = if List.Count(Cols) >= 1 then Cols{0} else error "Table 'companies' must have at least one column (company name).",
+
+    // Helper: safe text
+    NBSP = Character.FromNumber(160),
+    CleanText = (t as any) as text =>
+        let x = if t = null then "" else Text.From(t) in Text.Trim(Text.Replace(x, NBSP, " ")),
+
+    // --- Self-test against a known working pattern (v2 by domain) ---
+    SelfTestTry = try Json.Document(
+                      Web.Contents(
+                          "https://api.hunter.io",
+                          [ RelativePath = "v2/domain-search", Query = [ domain = "stripe.com", api_key = ApiKey ] ]
+                      )
+                  ),
+    SelfTestOK  = not SelfTestTry[HasError] and (try SelfTestTry[Value][data][domain] otherwise null) = "stripe.com",
+
+    // --- Callers (no special headers; no ManualStatusHandling) ---
+    CallV2ByCompany = (name as text) as nullable text =>
+        let
+            R = try Json.Document(
+                    Web.Contents(
+                        "https://api.hunter.io",
+                        [ RelativePath = "v2/domain-search", Query = [ company = name, api_key = ApiKey ] ]
+                    )
+                ) otherwise null,
+            Dom = if R = null then null else try R[data][domain] otherwise null
+        in Dom,
+
+    CallV1ByCompany = (name as text) as nullable text =>
+        let
+            R = try Json.Document(
+                    Web.Contents(
+                        "https://api.hunter.io",
+                        [ RelativePath = "v1/search", Query = [ company = name, api_key = ApiKey ] ]
+                    )
+                ) otherwise null,
+            Dom = if R = null then null else try R[data][domain] otherwise null
+        in Dom,
+
+    GetDomain = (company as any) as nullable text =>
+        let
+            c = CleanText(company),
+            d = if c = "" then null else
+                    let d2 = CallV2ByCompany(c) in
+                        if d2 <> null and Text.Trim(Text.From(d2)) <> "" then d2 else CallV1ByCompany(c)
+        in d,
+
+    WithDomain = if not SelfTestOK then 
+                    #table({"Domain","Status","ErrorMessage"}, {{ null, "RequestFailed", "Self-test (v2 domain=stripe.com) did not return expected data" }})
+                 else
+                    Table.AddColumn(Source, "Domain", each GetDomain( Record.Field(_, CompanyCol) ), type text)
+in
+    WithDomain

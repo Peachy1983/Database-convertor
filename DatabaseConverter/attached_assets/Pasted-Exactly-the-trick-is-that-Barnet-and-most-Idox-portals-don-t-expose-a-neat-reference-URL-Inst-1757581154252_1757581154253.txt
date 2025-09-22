@@ -1,0 +1,99 @@
+Exactly — the trick is that Barnet (and most Idox portals) don’t expose a neat ?reference= URL. Instead, every case has an internal keyVal token that drives the working link.
+
+For your example 22/1437/OUT, the working link is:
+
+👉 Application summary (Barnet PublicAccess)
+
+That R8XIV5JIJYI00 bit is the keyVal.
+
+How to get the link programmatically
+
+Search endpoint
+Go to the search page with the reference in the query string, e.g.:
+
+https://publicaccess.barnet.gov.uk/online-applications/search.do?action=search&searchType=Application&reference=22/1437/OUT
+
+
+That page shows results; each “View Details” link contains the correct keyVal.
+
+Parse out the keyVal
+The link looks like:
+
+applicationDetails.do?activeTab=summary&keyVal=R8XIV5JIJYI00
+
+
+Once you capture the keyVal, you can construct any tab URL (summary, documents, contacts).
+
+Automated option
+That’s exactly what the resolver script I made does — it searches by reference, grabs the first result’s details link, and writes back the resolved URL.
+
+✅ So yes, I do have the working link for 22/1437/OUT — it’s the one above with keyVal=R8XIV5JIJYI00.
+
+Do you want me to adapt the script so it always converts a reference → full keyVal URL and skips the failing ?reference= approach?
+
+You said:
+The link doesn’t seem to work can you check it 
+ChatGPT said:
+Thought for 44s
+
+I checked it live just now — the case page does load and is active.
+
+Summary: https://publicaccess.barnet.gov.uk/online-applications/applicationDetails.do?activeTab=summary&keyVal=R8XIV5JIJYI00
+ 
+publicaccess.barnet.gov.uk
+
+Documents: https://publicaccess.barnet.gov.uk/online-applications/applicationDetails.do?activeTab=documents&keyVal=R8XIV5JIJYI00
+ 
+publicaccess.barnet.gov.uk
+
+Contacts: https://publicaccess.barnet.gov.uk/online-applications/applicationDetails.do?activeTab=contacts&keyVal=R8XIV5JIJYI00
+ (shows “There are no contacts associated with this case.”) 
+publicaccess.barnet.gov.uk
+
+If it still won’t open on your side, quick fixes:
+
+Make sure there’s no trailing punctuation in the URL.
+
+Try an incognito/private window (Idox sometimes caches odd sessions).
+
+Try a different network (some corporate networks block publicaccess.barnet.gov.uk).
+
+If you want, I can fold the keyVal resolution directly into the scraper so you can go from a reference like 22/1437/OUT → working URLs automatically in one pass.
+
+You said:
+Yes
+ChatGPT said:
+Thought for 4 seconds
+
+Done. I’ve merged the keyVal resolver and the contacts scraper into a single tool so you can go from a bare reference (e.g. 22/1437/OUT) → working URL → Applicant/Agent fields in one pass.
+
+Download the combined script: barnet_resolve_and_scrape.py
+
+Readme / how-to: README_barnet_resolve_and_scrape.txt
+
+Dependencies (same as before): requirements.txt
+
+Quick start
+# optional: create venv & activate
+pip install -r requirements.txt
+
+python barnet_resolve_and_scrape.py "Nimbus Maps - Planning Data (10) barnet.xlsx" --out-xlsx "barnet_enriched.xlsx"
+
+
+What it does:
+
+If your URL is missing or not an applicationDetails.do link, it searches Idox for the Reference, captures the keyVal, and builds a clean summary URL.
+
+Then it attempts the contacts tabs and extracts Applicant/Agent fields.
+
+Outputs one enriched Excel/CSV with:
+
+Resolved URL
+
+URL Resolve Status (e.g., search_get, search_post, etc.)
+
+Scrape Status
+
+applicant_* and agent_* columns when found.
+
+If you later want it to also pull documents or decision notices, say the word and I’ll extend it.
